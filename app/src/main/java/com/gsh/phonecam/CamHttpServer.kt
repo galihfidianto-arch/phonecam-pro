@@ -3,21 +3,24 @@ package com.gsh.phonecam
 import android.content.Context
 import android.util.Base64
 import java.io.BufferedOutputStream
+import java.io.BufferedReader
+import java.io.InputStreamReader
 import java.io.OutputStream
 import java.net.InetSocketAddress
+import java.net.ServerSocket
+import java.net.Socket
 import java.util.concurrent.Executors
 
 /**
- * HTTP server MJPEG di HP — pintu masuk PC/OBS:
+ * HTTP server MJPEG di HP — pure java.net (tanpa com.sun, kompatibel Android).
  *
  *   GET /mjpeg           → stream MJPEG (multipart/x-mixed-replace)
  *   GET /snapshot.jpg    → 1 frame JPEG
- *   GET /control?cmd=X   → kontrol kamera (fitur Pro):
- *                          torch=on|off, camera=front|back, zoom=1..5
+ *   GET /control?cmd=X    → kontrol Pro: torch=on|off, camera=front|back, zoom=1..5, quality=0..2
  *   GET /status          → JSON: fps, resolusi, passcode aktif
- *   GET /                → halaman viewer HTML (buka di browser PC)
+ *   GET /                → halaman viewer HTML (buka di browser PC / OBS Browser Source)
  *
- * Semua endpoint (kecuali /status) dicek passcode via Basic Auth bila diaktifkan.
+ * Endpoint (kecuali /status) dicek passcode via Basic Auth bila aktif.
  */
 class CamHttpServer(
     private val ctx: Context,
@@ -26,148 +29,180 @@ class CamHttpServer(
 ) {
     private val pool = Executors.newCachedThreadPool()
     @Volatile private var running = false
-    private var server: com.sun.net.httpserver.HttpServer? = null
+    private var serverSocket: ServerSocket? = null
 
     fun start() {
         running = true
-        server = com.sun.net.httpserver.HttpServer.create(InetSocketAddress(port), 0).also { s ->
-            s.executor = pool
-            s.createContext("/") { exchange ->
+        serverSocket = ServerSocket().apply {
+            reuseAddress = true
+            bind(InetSocketAddress(port))
+        }
+        Thread {
+            while (running) {
                 try {
-                    handle(exchange.requestURI.path ?: "/", exchange)
+                    val client = serverSocket?.accept() ?: break
+                    pool.execute { handleClient(client) }
                 } catch (_: Exception) {
-                    // koneksi putus — normal untuk MJPEG
-                } finally {
-                    if (exchange.requestURI.path != "/mjpeg") {
-                        try { exchange.close() } catch (_: Exception) {}
-                    }
+                    if (running) Thread.sleep(100)
                 }
             }
-            s.start()
-        }
+        }.apply { isDaemon = true }.start()
     }
 
     fun stop() {
         running = false
-        server?.stop(0)
+        try { serverSocket?.close() } catch (_: Exception) {}
         pool.shutdownNow()
     }
 
-    private fun checkAuth(exchange: com.sun.net.httpserver.HttpExchange): Boolean {
-        val code = Prefs.passcode
-        if (code.isEmpty()) return true
-        val auth = exchange.requestHeaders.getFirst("Authorization") ?: return false
-        if (!auth.startsWith("Basic ", ignoreCase = true)) return false
-        val decoded = String(Base64.decode(auth.substring(6), Base64.DEFAULT))
-        return decoded == ":$code"
-    }
+    private fun handleClient(client: Socket) {
+        try {
+            client.soTimeout = 15000
+            val input = BufferedReader(InputStreamReader(client.getInputStream()))
+            val requestLine = input.readLine() ?: return
+            val parts = requestLine.split(" ")
+            if (parts.size < 2) return
+            val fullPath = parts[1]
 
-    private fun unauthorized(exchange: com.sun.net.httpserver.HttpExchange) {
-        exchange.responseHeaders.add("WWW-Authenticate", "Basic realm=\"PhoneCam Pro\"")
-        exchange.sendResponseHeaders(401, -1)
-    }
-
-    private fun handle(path: String, exchange: com.sun.net.httpserver.HttpExchange) {
-        if (path == "/status") { status(exchange); return }
-        if (!checkAuth(exchange)) { unauthorized(exchange); return }
-
-        when (path) {
-            "/", "/index.html" -> viewer(exchange)
-            "/mjpeg" -> mjpeg(exchange)
-            "/snapshot.jpg" -> snapshot(exchange)
-            "/control" -> control(exchange)
-            else -> {
-                exchange.sendResponseHeaders(404, -1)
+            // Baca headers (untuk Authorization)
+            var authHeader: String? = null
+            while (true) {
+                val line = input.readLine() ?: break
+                if (line.isEmpty()) break
+                if (line.startsWith("Authorization:", ignoreCase = true)) authHeader = line
             }
+
+            val path = fullPath.substringBefore('?')
+            val query = fullPath.substringAfter('?', "")
+            val out = BufferedOutputStream(client.getOutputStream(), 1 shl 16)
+
+            if (path == "/status") {
+                status(out)
+            } else if (!checkAuth(authHeader)) {
+                unauthorized(out)
+            } else {
+                when (path) {
+                    "/", "/index.html" -> viewer(out)
+                    "/mjpeg" -> mjpeg(out)
+                    "/snapshot.jpg" -> snapshot(out)
+                    "/control" -> control(query, out)
+                    else -> notFound(out)
+                }
+            }
+            out.flush()
+        } catch (_: Exception) {
+            // koneksi putus — normal
+        } finally {
+            try { client.close() } catch (_: Exception) {}
         }
     }
 
-    private fun status(exchange: com.sun.net.httpserver.HttpExchange) {
-        val json = """
-            {"app":"PhoneCam Pro","fps":${"%.1f".format(engine.fps)},
-             "resolution":"${engine.resolution}","passcode":${Prefs.passcode.isNotEmpty()},
-             "front_camera":${engine.useFront},"torch":${engine.torch}}
-        """.trimIndent()
-        bytes(exchange, 200, json.toByteArray(), "application/json")
+    private fun checkAuth(authHeader: String?): Boolean {
+        val code = Prefs.passcode
+        if (code.isEmpty()) return true
+        val auth = authHeader ?: return false
+        val idx = auth.indexOf(' ')
+        if (idx < 0 || !auth.substring(0, idx).equals("Basic", ignoreCase = true)) return false
+        val decoded = try {
+            String(Base64.decode(auth.substring(idx + 1).trim(), Base64.DEFAULT))
+        } catch (_: Exception) { return false }
+        return decoded == ":$code"
     }
 
-    private fun control(exchange: com.sun.net.httpserver.HttpExchange) {
-        val q = exchange.requestURI.rawQuery ?: ""
-        val params = q.split("&").mapNotNull {
-            val (k, v) = it.split("=", limit = 2).let { p -> p.getOrNull(0) to p.getOrNull(1) }
-            k?.let { kk -> kk to (v ?: "") }
-        }.toMap()
+    private fun writeHeaders(out: OutputStream, code: Int, status: String, type: String?, extra: List<String> = emptyList()) {
+        val sb = StringBuilder()
+        sb.append("HTTP/1.1 $code $status\r\n")
+        sb.append("Server: PhoneCamPro\r\n")
+        if (type != null) sb.append("Content-Type: $type\r\n")
+        for (e in extra) sb.append(e).append("\r\n")
+        sb.append("\r\n")
+        out.write(sb.toString().toByteArray())
+    }
 
-        when (params["cmd"]) {
+    private fun unauthorized(out: OutputStream) {
+        writeHeaders(out, 401, "Unauthorized", null, listOf("WWW-Authenticate: Basic realm=\"PhoneCam Pro\""))
+    }
+
+    private fun notFound(out: OutputStream) {
+        writeHeaders(out, 404, "Not Found", "text/plain")
+        out.write("404".toByteArray())
+    }
+
+    private fun status(out: OutputStream) {
+        val fps = "%.1f".format(engine.fps)
+        val json = """{"app":"PhoneCam Pro","fps":$fps,"resolution":"${engine.resolution}",""" +
+                """"passcode":${Prefs.passcode.isNotEmpty()},"front_camera":${engine.useFront},"torch":${engine.torch}}"""
+        writeHeaders(out, 200, "OK", "application/json")
+        out.write(json.toByteArray())
+    }
+
+    private fun snapshot(out: OutputStream) {
+        val jpeg = engine.latestJpeg
+        if (jpeg == null) {
+            writeHeaders(out, 503, "Service Unavailable", "text/plain")
+            out.write("kamera belum siap".toByteArray())
+        } else {
+            writeHeaders(out, 200, "OK", "image/jpeg")
+            out.write(jpeg)
+        }
+    }
+
+    private fun control(query: String, out: OutputStream) {
+        val params = query.split("&").mapNotNull {
+            val kv = it.split("=", limit = 2)
+            if (kv.size == 2) kv[0] to kv[1] else null
+        }.toMap()
+        val json = when (params["cmd"]) {
             "torch" -> {
                 val on = params["v"] == "on"
                 engine.setTorch(on)
-                json(exchange, """{"ok":true,"torch":$on}""")
+                """{"ok":true,"torch":$on}"""
             }
             "camera" -> {
                 val front = params["v"] == "front"
                 if (front != engine.useFront) engine.switchCamera()
-                json(exchange, """{"ok":true,"front":$front}""")
+                """{"ok":true,"front":$front}"""
             }
             "zoom" -> {
-                val z = (params["v"] ?: "1").toFloatOrNull()?.coerceIn(1f, 5f) ?: 1f
+                val z = params["v"]?.toFloatOrNull()?.coerceIn(1f, 5f) ?: 1f
                 engine.setZoom(z)
-                json(exchange, """{"ok":true,"zoom":$z}""")
+                """{"ok":true,"zoom":$z}"""
             }
             "quality" -> {
-                val qv = (params["v"] ?: "1").toIntOrNull()?.coerceIn(0, 2) ?: 1
+                val qv = params["v"]?.toIntOrNull()?.coerceIn(0, 2) ?: 1
                 Prefs.quality = qv
-                json(exchange, """{"ok":true,"quality":$qv}""")
+                """{"ok":true,"quality":$qv}"""
             }
-            else -> json(exchange, """{"ok":false,"error":"unknown cmd"}""")
+            else -> """{"ok":false,"error":"unknown cmd"}"""
         }
+        writeHeaders(out, 200, "OK", "application/json")
+        out.write(json.toByteArray())
     }
 
-    private fun snapshot(exchange: com.sun.net.httpserver.HttpExchange) {
-        val jpeg = engine.latestJpeg
-        if (jpeg == null) {
-            exchange.sendResponseHeaders(503, -1)
-        } else {
-            bytes(exchange, 200, jpeg, "image/jpeg")
-        }
-    }
-
-    private fun mjpeg(exchange: com.sun.net.httpserver.HttpExchange) {
-        val out = exchange.responseHeaders
-        out.add("Content-Type", "multipart/x-mixed-replace; boundary=frame")
-        exchange.sendResponseHeaders(200, 0)
-        val body = exchange.responseBody
-        val buf = BufferedOutputStream(body, 1 shl 16)
-        var lastSent = 0L
+    private fun mjpeg(out: OutputStream) {
+        writeHeaders(out, 200, "OK", "multipart/x-mixed-replace; boundary=frame")
+        val header = "--frame\r\nContent-Type: image/jpeg\r\nContent-Length: "
         while (running) {
-            val jpeg = engine.latestJpeg
-            if (jpeg != null) {
-                buf.write("--frame\r\n".toByteArray())
-                buf.write("Content-Type: image/jpeg\r\nContent-Length: ${jpeg.size}\r\n\r\n".toByteArray())
-                buf.write(jpeg)
-                buf.write("\r\n".toByteArray())
-                buf.flush()
+            try {
+                val jpeg = engine.latestJpeg
+                if (jpeg != null) {
+                    out.write(header.toByteArray())
+                    out.write(jpeg.size.toString().toByteArray())
+                    out.write("\r\n\r\n".toByteArray())
+                    out.write(jpeg)
+                    out.write("\r\n".toByteArray())
+                    out.flush()
+                }
+                Thread.sleep(33) // ~30 FPS
+            } catch (_: Exception) {
+                break // client putus
             }
-            Thread.sleep(33) // ~30 FPS max
         }
-        try { body.close() } catch (_: Exception) {}
     }
 
-    private fun viewer(exchange: com.sun.net.httpserver.HttpExchange) {
-        val html = VIEWER_HTML.toByteArray()
-        bytes(exchange, 200, html, "text/html; charset=utf-8")
-    }
-
-    private fun json(exchange: com.sun.net.httpserver.HttpExchange, s: String) =
-        bytes(exchange, 200, s.toByteArray(), "application/json")
-
-    private fun bytes(
-        exchange: com.sun.net.httpserver.HttpExchange,
-        code: Int, data: ByteArray, type: String
-    ) {
-        exchange.responseHeaders.add("Content-Type", type)
-        exchange.sendResponseHeaders(code, data.size.toLong())
-        exchange.responseBody.use { it.write(data) }
+    private fun viewer(out: OutputStream) {
+        writeHeaders(out, 200, "OK", "text/html; charset=utf-8")
+        out.write(VIEWER_HTML.toByteArray())
     }
 
     private val VIEWER_HTML = """
@@ -177,27 +212,24 @@ class CamHttpServer(
         <style>
           body{background:#0e1116;color:#e9eef5;font:15px system-ui;margin:0;padding:24px;text-align:center}
           img{max-width:100%;border-radius:12px;margin:16px 0;border:1px solid #293647}
-          .btn{display:inline-block;margin:4px;padding:10px 16px;background:#36a269;color:#fff;border:0;border-radius:8px;cursor:pointer;font-size:15px}
+          .btn{margin:4px;padding:10px 16px;background:#36a269;color:#fff;border:0;border-radius:8px;cursor:pointer;font-size:15px}
           .btn.off{background:#d54f55} .btn.sec{background:#3b4a61}
           #bar{display:flex;gap:8px;justify-content:center;flex-wrap:wrap}
         </style></head><body>
-        <h2>📱 PhoneCam Pro — Viewer</h2>
+        <h2>&#128241; PhoneCam Pro &mdash; Viewer</h2>
         <img src="/mjpeg" id="cam">
         <div id="bar">
-          <button class="btn" onclick="ctl('camera','front')">🤳 Kamera Depan</button>
-          <button class="btn" onclick="ctl('camera','back')">📷 Kamera Belakang</button>
-          <button class="btn" onclick="ctl('torch','on')">🔦 Torch On</button>
-          <button class="btn off" onclick="ctl('torch','off')">🔦 Torch Off</button>
+          <button class="btn" onclick="ctl('camera','front')">&#129489; Depan</button>
+          <button class="btn" onclick="ctl('camera','back')">&#128247; Belakang</button>
+          <button class="btn" onclick="ctl('torch','on')">&#128295; Torch On</button>
+          <button class="btn off" onclick="ctl('torch','off')">&#128295; Torch Off</button>
           <button class="btn sec" onclick="ctl('zoom','1')">1x</button>
           <button class="btn sec" onclick="ctl('zoom','2')">2x</button>
           <button class="btn sec" onclick="ctl('zoom','3')">3x</button>
         </div>
-        <p style="color:#aeb9c6">Untuk OBS: tambah source <b>Browser</b> → URL ini,
-        atau Media Source dengan <code>/mjpeg</code>. Snapshot: <a style="color:#7fc4ff" href="/snapshot.jpg">/snapshot.jpg</a></p>
+        <p style="color:#aeb9c6">OBS: Source <b>Browser</b> &rarr; URL ini. Snapshot: <a style="color:#7fc4ff" href="/snapshot.jpg">/snapshot.jpg</a></p>
         <script>
-        async function ctl(cmd,v){
-          await fetch('/control?cmd='+cmd+'&v='+v);
-        }
+        function ctl(cmd,v){fetch('/control?cmd='+cmd+'&v='+v)}
         </script></body></html>
     """.trimIndent()
 }
