@@ -30,7 +30,7 @@ class CameraEngine(private val ctx: Context) {
         private set
 
     @Volatile var useFront = Prefs.useFrontCamera
-    @Volatile var torch = Prefs.torch
+    @Volatile private var torchOn = Prefs.torch
     @Volatile private var zoom = 1f
 
     private val cameraManager = ctx.getSystemService(Context.CAMERA_SERVICE) as CameraManager
@@ -133,7 +133,7 @@ class CameraEngine(private val ctx: Context) {
                         addTarget(surface)
                         set(CaptureRequest.CONTROL_AF_MODE, CaptureRequest.CONTROL_AF_MODE_CONTINUOUS_VIDEO)
                         set(CaptureRequest.CONTROL_AE_MODE, CaptureRequest.CONTROL_AE_MODE_ON)
-                        if (torch) set(CaptureRequest.FLASH_MODE, CaptureRequest.FLASH_MODE_TORCH)
+                        if (torchOn) set(CaptureRequest.FLASH_MODE, CaptureRequest.FLASH_MODE_TORCH)
                     }
                     session.setRepeatingRequest(request.build(), null, backgroundHandler)
                 }
@@ -216,8 +216,10 @@ class CameraEngine(private val ctx: Context) {
         restart()
     }
 
+    val isTorchOn: Boolean get() = torchOn
+
     fun setTorch(on: Boolean) {
-        torch = on; Prefs.torch = on
+        torchOn = on; Prefs.torch = on
         restart()
     }
 

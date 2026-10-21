@@ -131,7 +131,7 @@ class CamHttpServer(
     private fun status(out: OutputStream) {
         val fps = "%.1f".format(engine.fps)
         val json = """{"app":"PhoneCam Pro","fps":$fps,"resolution":"${engine.resolution}",""" +
-                """"passcode":${Prefs.passcode.isNotEmpty()},"front_camera":${engine.useFront},"torch":${engine.torch}}"""
+                """"passcode":${Prefs.passcode.isNotEmpty()},"front_camera":${engine.useFront},"torch":${engine.isTorchOn}}"""
         writeHeaders(out, 200, "OK", "application/json")
         out.write(json.toByteArray())
     }
