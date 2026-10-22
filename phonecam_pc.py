@@ -80,15 +80,24 @@ class MdnsFinder:
         return list(self.found)
 
 
-def adb_candidates():
-    """Padanan [USB] Iriun: adb devices → forward tcp:4699."""
+def adb_forward(local_port=4699, phone_port=8085):
+    """Padanan persis engine.dll Iriun: `adb forward tcp:4699 tcp:8085`.
+    Setiap device USB terpasang mendapat tunnel → PC konek via 127.0.0.1:4699.
+    (Hasil RE: engine.dll memakai adb.exe + `forward tcp:` + port 4697/4699)"""
     out = []
     try:
         r = subprocess.run(["adb", "devices"], capture_output=True, text=True, timeout=5)
         for line in r.stdout.splitlines()[1:]:
-            if line.strip() and "device" in line:
-                dev = line.split()[0]
-                out.append(("127.0.0.1", 4699, dev))
+            parts = line.split("\t")
+            if len(parts) >= 2 and parts[1].strip() == "device":
+                dev = parts[0]
+                subprocess.run(
+                    ["adb", "-s", dev, "forward", f"tcp:{local_port}", f"tcp:{phone_port}"],
+                    capture_output=True, timeout=5)
+                out.append(("127.0.0.1", local_port, dev))
+                print(f"  [USB] adb forward {dev}: 127.0.0.1:{local_port} → hp:{phone_port}")
+    except FileNotFoundError:
+        pass
     except Exception:
         pass
     return out
@@ -230,7 +239,7 @@ def main():
                 print(f"   scan subnet {prefix}.0/24 ...")
                 cands += scan_subnet(prefix)
         if not cands:
-            cands += adb_candidates()  # USB
+            cands += adb_forward()  # USB — padanan Iriun adb forward tcp:4699
         if not cands:
             print("❌ HP tidak ditemukan. Pastikan app PhoneCam Pro aktif di HP, "
                   "atau jalankan: python phonecam_pc.py 192.168.x.x:8085")
