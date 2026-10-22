@@ -55,6 +55,8 @@ class CameraServerService : Service() {
 
         engine = CameraEngine(this).also { it.start() }
         server = CamHttpServer(this, engine!!, Prefs.port).also { it.start() }
+        // mDNS advertise — agar PC auto-discovery (padanan _iriunwebcam._tcp.)
+        NsdAdvertiser.start(this, Prefs.port)
 
         return START_STICKY
     }
@@ -62,6 +64,7 @@ class CameraServerService : Service() {
     override fun onDestroy() {
         isRunning = false
         instance = null
+        NsdAdvertiser.stop()
         server?.stop()
         engine?.fullStop()
         super.onDestroy()

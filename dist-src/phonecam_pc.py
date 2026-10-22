@@ -114,9 +114,49 @@ def adb_forward(local_port=4699, phone_port=8085):
                 print(f"  [USB] adb forward {dev}: 127.0.0.1:{local_port} → hp:{phone_port}")
     except FileNotFoundError:
         print("  [USB] adb tidak ditemukan")
+    except Exception as e:
+        print(f"  [USB] adb error: {e}")
+    # Diagnostic: device terdeteksi tapi unauthorized/offline?
+    try:
+        adb = _adb_path()
+        cmd = ([adb] if adb else ["adb"])
+        r = subprocess.run(cmd + ["devices"], capture_output=True, text=True, timeout=5)
+        lines = [l for l in r.stdout.splitlines()[1:] if l.strip()]
+        if lines and not out:
+            for l in lines:
+                if "unauthorized" in l:
+                    print("  [USB] ⚠ HP terdeteksi tapi UNAUTHORIZED — buka HP, approve dialog 'Izinkan USB debugging'")
+                elif "offline" in l:
+                    print("  [USB] ⚠ HP terdeteksi tapi OFFLINE — cabut & colok ulang kabel")
+                else:
+                    print(f"  [USB] device state: {l.strip()}")
     except Exception:
         pass
     return out
+
+
+def local_subnet():
+    """Deteksi subnet WiFi/ethernet yang BENAR.
+    gethostbyname sering salah di Windows (VirtualBox/loopback) —
+    trik UDP socket ke 8.8.8.8 memberi interface yang benar-benar dipakai."""
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        s.settimeout(0.5)
+        s.connect(("8.8.8.8", 80))  # tidak mengirim paket — cuma pilih route
+        ip = s.getsockname()[0]
+        s.close()
+        if ip and not ip.startswith("127."):
+            return ip.rsplit(".", 1)[0]
+    except Exception:
+        pass
+    # fallback: hostname
+    try:
+        ip = socket.gethostbyname(socket.gethostname())
+        if ip and not ip.startswith("127."):
+            return ip.rsplit(".", 1)[0]
+    except Exception:
+        pass
+    return None
 
 
 def scan_subnet(prefix, port=8085, timeout=0.3, limit=254):
@@ -245,20 +285,24 @@ def main():
     if not target:
         print("🔍 Mencari HP PhoneCam Pro...")
         cands = []
-        if HAVE_ZC:
+        # 1. USB dulu (paling andal — adb forward langsung)
+        cands += adb_forward()
+        # 2. mDNS (bila HP baru — butuh APK v1.3+)
+        if HAVE_ZC and not cands:
             cands += MdnsFinder().find(3)
+        # 3. Scan subnet yang BENAR (UDP route trick)
         if not cands:
-            # scan subnet WiFi lokal
-            ip = socket.gethostbyname(socket.gethostname())
-            if ip and not ip.startswith("127."):
-                prefix = ip.rsplit(".", 1)[0]
+            prefix = local_subnet()
+            if prefix:
                 print(f"   scan subnet {prefix}.0/24 ...")
                 cands += scan_subnet(prefix)
         if not cands:
-            cands += adb_forward()  # USB — padanan Iriun adb forward tcp:4699
-        if not cands:
-            print("❌ HP tidak ditemukan. Pastikan app PhoneCam Pro aktif di HP, "
-                  "atau jalankan: python phonecam_pc.py 192.168.x.x:8085")
+            print("❌ HP tidak ditemukan. Checklist:")
+            print("   1. App PhoneCam Pro di HP → tekan 'Mulai Server Kamera'")
+            print("   2. HP & PC harus satu WiFi")
+            print("   3. USB: aktifkan USB debugging, colok kabel, approve dialog di HP")
+            print("   4. Manual: python phonecam_pc.py <ip-hp>:8085")
+            print("      (lihat IP di layar app HP)")
             sys.exit(1)
         host, port = cands[0][0], cands[0][1]
         target = f"{host}:{port}"

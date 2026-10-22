@@ -34,13 +34,5 @@
             android:name=".CameraServerService"
             android:exported="false"
             android:foregroundServiceType="camera|microphone" />
-
-        <!-- mDNS discovery seperti Iriun _iriunwebcam._tcp -->
-        <service android:name=".DiscoveryService"
-            android:exported="false">
-            <intent-filter>
-                <action android:name="android.intent.action.MAIN" />
-            </intent-filter>
-        </service>
     </application>
 </manifest>
