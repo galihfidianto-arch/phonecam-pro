@@ -90,25 +90,23 @@ class MainActivity : AppCompatActivity() {
         val camLine = when {
             engine == null -> "Kamera: belum mulai"
             engine.isStreaming -> "Kamera: 🟢 streaming ${engine.resolution} @ ${"%.1f".format(engine.fps)}fps"
-            else -> "Kamera: ⏳ menunggu frame..."
+            engine.lastError != null -> "Kamera: 🔴 gagal — ${engine.lastError}"
+            else -> "Kamera: ⏳ menunggu frame... (buka tutup app ini bila >10 detik)"
         }
         val srvLine = when {
             server == null -> "Server: belum mulai"
             server.bindError != null -> "Server: 🔴 ${server.bindError}"
-            server.bindOk -> "Server: 🟢 aktif di port $port"
+            server.bindOk -> "Server: 🟢 aktif di :$port"
             else -> "Server: ⏳ binding..."
         }
-        val errLine = engine?.lastError?.let { "\n⚠ $it" } ?: ""
 
         statusText.text = buildString {
-            appendLine("Status layanan: ${if (running) "🟢 BERJALAN" else "🔴 berhenti"}")
+            appendLine("Status: ${if (running) "🟢 BERJALAN" else "🔴 berhenti"}")
             appendLine(camLine)
             appendLine(srvLine)
-            append(errLine)
             appendLine()
-            appendLine(if (running) "Di PC buka: http://$ip:$port" else "Tekan mulai untuk menyalakan server")
-            appendLine()
-            appendLine("Passcode: ${if (Prefs.passcode.isEmpty()) "nonaktif" else "aktif ✅"}")
+            appendLine(if (running) "PC konek: http://$ip:$port" else "Tekan mulai untuk menyalakan")
+            appendLine("Passcode: ${if (Prefs.passcode.isEmpty()) "nonaktif" else "aktif"}")
         }
     }
 
