@@ -19,7 +19,9 @@ class CameraServerService : Service() {
 
     companion object {
         const val CHANNEL = "phonecam_server"
-        var isRunning = false
+        @Volatile var isRunning = false
+            private set
+        @Volatile var instance: CameraServerService? = null
             private set
 
         fun start(ctx: Context) {
@@ -33,8 +35,10 @@ class CameraServerService : Service() {
         }
     }
 
-    private var httpServer: CamHttpServer? = null
-    private var cameraEngine: CameraEngine? = null
+    var engine: CameraEngine? = null
+        private set
+    var server: CamHttpServer? = null
+        private set
 
     override fun onBind(intent: Intent?): IBinder? = null
 
@@ -47,17 +51,19 @@ class CameraServerService : Service() {
             startForeground(1, notif)
         }
         isRunning = true
+        instance = this
 
-        cameraEngine = CameraEngine(this).also { it.start() }
-        httpServer = CamHttpServer(this, cameraEngine!!, Prefs.port).also { it.start() }
+        engine = CameraEngine(this).also { it.start() }
+        server = CamHttpServer(this, engine!!, Prefs.port).also { it.start() }
 
         return START_STICKY
     }
 
     override fun onDestroy() {
         isRunning = false
-        httpServer?.stop()
-        cameraEngine?.release()
+        instance = null
+        server?.stop()
+        engine?.fullStop()
         super.onDestroy()
     }
 
@@ -78,7 +84,7 @@ class CameraServerService : Service() {
         )
         return NotificationCompat.Builder(this, CHANNEL)
             .setContentTitle("PhoneCam Pro aktif")
-            .setContentText("Webcam server berjalan — buka di PC: http://${NetUtils.wifiIpAddress(this)}:${Prefs.port}")
+            .setContentText("Webcam server berjalan — port ${Prefs.port}")
             .setSmallIcon(android.R.drawable.ic_menu_camera)
             .setContentIntent(pi)
             .setOngoing(true)

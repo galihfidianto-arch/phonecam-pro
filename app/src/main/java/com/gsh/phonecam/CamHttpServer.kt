@@ -29,15 +29,27 @@ class CamHttpServer(
 ) {
     private val pool = Executors.newCachedThreadPool()
     @Volatile private var running = false
+    @Volatile var bindOk = false
+        private set
+    @Volatile var bindError: String? = null
+        private set
     private var serverSocket: ServerSocket? = null
 
     fun start() {
         running = true
-        serverSocket = ServerSocket().apply {
-            reuseAddress = true
-            bind(InetSocketAddress(port))
-        }
+        // Bind di thread terpisah — hindari NetworkOnMainThreadException
         Thread {
+            try {
+                serverSocket = ServerSocket().apply {
+                    reuseAddress = true
+                    bind(InetSocketAddress(port))
+                }
+                bindOk = true
+            } catch (e: Exception) {
+                android.util.Log.e("PhoneCamServer", "bind gagal: ${e.message}")
+                bindError = "Port $port gagal: ${e.message}"
+                return@Thread
+            }
             while (running) {
                 try {
                     val client = serverSocket?.accept() ?: break

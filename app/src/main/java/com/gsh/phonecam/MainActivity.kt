@@ -2,8 +2,9 @@ package com.gsh.phonecam
 
 import android.Manifest
 import android.content.pm.PackageManager
-import android.os.Build
 import android.os.Bundle
+import android.os.Handler
+import android.os.Looper
 import android.widget.Button
 import android.widget.EditText
 import android.widget.TextView
@@ -12,15 +13,19 @@ import androidx.appcompat.app.AppCompatActivity
 import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
 
-/**
- * PhoneCam Pro — HP jadi webcam 4K untuk PC via WiFi/USB.
- * Semua fitur "Pro" aktif: tanpa watermark, passcode, kontrol kamera penuh.
- */
 class MainActivity : AppCompatActivity() {
 
     private lateinit var statusText: TextView
     private lateinit var passcodeEdit: EditText
     private lateinit var startButton: Button
+    private lateinit var stopButton: Button
+    private val ui = Handler(Looper.getMainLooper())
+    private val poller = object : Runnable {
+        override fun run() {
+            updateStatus()
+            if (CameraServerService.isRunning) ui.postDelayed(this, 1000)
+        }
+    }
 
     private val perms = arrayOf(Manifest.permission.CAMERA, Manifest.permission.RECORD_AUDIO)
 
@@ -31,14 +36,18 @@ class MainActivity : AppCompatActivity() {
         statusText = findViewById(R.id.statusText)
         passcodeEdit = findViewById(R.id.passcodeEdit)
         startButton = findViewById(R.id.startButton)
+        stopButton = findViewById(R.id.stopButton)
 
         Prefs.init(this)
         passcodeEdit.setText(Prefs.passcode)
-        passcodeEdit.hint = "Passcode (kosong = bebas)"
 
         startButton.setOnClickListener {
             Prefs.passcode = passcodeEdit.text.toString().trim()
             if (hasPerms()) startServer() else requestPerms()
+        }
+        stopButton.setOnClickListener {
+            CameraServerService.stop(this)
+            ui.post { updateStatus() }
         }
 
         updateStatus()
@@ -65,23 +74,40 @@ class MainActivity : AppCompatActivity() {
 
     private fun startServer() {
         CameraServerService.start(this)
-        Toast.makeText(this, "Server kamera aktif", Toast.LENGTH_SHORT).show()
+        // poll status tiap detik — tampilkan error live
+        ui.postDelayed(poller, 800)
         updateStatus()
     }
 
     private fun updateStatus() {
         val ip = NetUtils.wifiIpAddress(this) ?: "?"
+        val port = Prefs.port
         val running = CameraServerService.isRunning
+        val svc = CameraServerService.instance
+        val engine = svc?.engine
+        val server = svc?.server
+
+        val camLine = when {
+            engine == null -> "Kamera: belum mulai"
+            engine.isStreaming -> "Kamera: 🟢 streaming ${engine.resolution} @ ${"%.1f".format(engine.fps)}fps"
+            else -> "Kamera: ⏳ menunggu frame..."
+        }
+        val srvLine = when {
+            server == null -> "Server: belum mulai"
+            server.bindError != null -> "Server: 🔴 ${server.bindError}"
+            server.bindOk -> "Server: 🟢 aktif di port $port"
+            else -> "Server: ⏳ binding..."
+        }
+        val errLine = engine?.lastError?.let { "\n⚠ $it" } ?: ""
+
         statusText.text = buildString {
-            appendLine("PhoneCam Pro — semua fitur aktif ✅")
+            appendLine("Status layanan: ${if (running) "🟢 BERJALAN" else "🔴 berhenti"}")
+            appendLine(camLine)
+            appendLine(srvLine)
+            append(errLine)
             appendLine()
-            appendLine("Status: ${if (running) "🟢 BERJALAN" else "🔴 berhenti"}")
+            appendLine(if (running) "Di PC buka: http://$ip:$port" else "Tekan mulai untuk menyalakan server")
             appendLine()
-            appendLine("Di PC, buka: http://$ip:8085")
-            appendLine("atau jalankan viewer Python: python phonecam_viewer.py")
-            appendLine()
-            appendLine("mDNS: _phonecam._tcp. (auto-discovery)")
-            appendLine("Video: MJPEG — langsung HP→PC, tanpa cloud")
             appendLine("Passcode: ${if (Prefs.passcode.isEmpty()) "nonaktif" else "aktif ✅"}")
         }
     }
@@ -89,5 +115,11 @@ class MainActivity : AppCompatActivity() {
     override fun onResume() {
         super.onResume()
         updateStatus()
+        if (CameraServerService.isRunning) ui.postDelayed(poller, 1000)
+    }
+
+    override fun onPause() {
+        super.onPause()
+        ui.removeCallbacks(poller)
     }
 }

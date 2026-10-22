@@ -23,6 +23,10 @@ class CameraEngine(private val ctx: Context) {
     interface ErrorListener { fun onError(msg: String) }
     var errorListener: ErrorListener? = null
 
+    /** Error terakhir — ditampilkan di UI. */
+    @Volatile var lastError: String? = null
+        private set
+
     @Volatile var latestJpeg: ByteArray? = null
         private set
     @Volatile var fps = 0.0
@@ -47,15 +51,17 @@ class CameraEngine(private val ctx: Context) {
 
     private fun report(msg: String) {
         android.util.Log.e("PhoneCamEngine", msg)
+        lastError = msg
         errorListener?.onError(msg)
     }
 
     fun start() {
+        // Buat handler thread DULU — post butuh handler yang sudah hidup
+        if (backgroundThread == null) {
+            backgroundThread = HandlerThread("cam").also { it.start() }
+            backgroundHandler = Handler(backgroundThread!!.looper)
+        }
         backgroundHandler?.post {
-            if (backgroundThread == null) {
-                backgroundThread = HandlerThread("cam").also { it.start() }
-                backgroundHandler = Handler(backgroundThread!!.looper)
-            }
             openCamera()
         }
     }
