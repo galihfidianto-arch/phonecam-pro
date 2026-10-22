@@ -30,7 +30,7 @@ object NsdAdvertiser {
                 override fun onRegistrationFailed(r: NsdServiceInfo, err: Int) {
                     Log.e(TAG, "mDNS gagal kode $err")
                 }
-                override fun onUnregistered(r: NsdServiceInfo) {}
+                override fun onServiceUnregistered(r: NsdServiceInfo) {}
                 override fun onUnregistrationFailed(r: NsdServiceInfo, err: Int) {}
             }
             nsdManager?.registerService(info, NsdManager.PROTOCOL_DNS_SD, listener)
