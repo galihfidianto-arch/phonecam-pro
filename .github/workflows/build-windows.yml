@@ -1,0 +1,61 @@
+name: Build Windows EXE
+
+on:
+  push:
+    branches: [main]
+    paths: ['dist-src/**', '.github/workflows/build-windows.yml']
+  workflow_dispatch:
+
+jobs:
+  build-windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install deps
+        shell: pwsh
+        run: |
+          pip install pyinstaller opencv-python-headless
+
+      - name: Build EXE (onefile)
+        shell: pwsh
+        run: |
+          cd dist-src
+          pyinstaller --onefile --name PhoneCamProPC --console phonecam_pc.py
+
+      # Adb resmi Google platform-tools — unduh langsung dari Google
+      - name: Bundle adb (Google platform-tools)
+        shell: pwsh
+        run: |
+          $url = "https://dl.google.com/android/repository/platform-tools-latest-windows.zip"
+          Invoke-WebRequest -Uri $url -OutFile pt.zip
+          Expand-Archive pt.zip -DestinationPath pt
+          New-Item -ItemType Directory -Force -Path dist/PhoneCamProPC-Windows/adb | Out-Null
+          Copy-Item pt/platform-tools/adb.exe dist/PhoneCamProPC-Windows/adb/
+          Copy-Item pt/platform-tools/AdbWinApi.dll dist/PhoneCamProPC-Windows/adb/
+          Copy-Item pt/platform-tools/AdbWinUsbApi.dll dist/PhoneCamProPC-Windows/adb/
+          Copy-Item dist-src/dist/PhoneCamProPC.exe dist/PhoneCamProPC-Windows/
+          Remove-Item pt.zip -Force
+          Remove-Item -Recurse pt -Force
+
+      - name: Smoke test EXE
+        shell: pwsh
+        run: |
+          $p = Start-Process -FilePath "dist/PhoneCamProPC-Windows/PhoneCamProPC.exe" -ArgumentList "127.0.0.1:19999","--no-window" -PassThru -NoNewWindow
+          Start-Sleep -Seconds 6
+          if (-not $p.HasExited) { Stop-Process -Id $p.Id -Force; "EXE berjalan (tidak crash)" }
+          else { "EXE exit code: $($p.ExitCode)" }
+
+      - name: Zip distribusi
+        shell: pwsh
+        run: |
+          Compress-Archive -Path dist/PhoneCamProPC-Windows -DestinationPath PhoneCamProPC-Windows.zip
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: PhoneCamProPC-Windows
+          path: PhoneCamProPC-Windows.zip
