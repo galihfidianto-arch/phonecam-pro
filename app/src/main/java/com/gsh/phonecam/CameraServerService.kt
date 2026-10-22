@@ -41,14 +41,14 @@ class CameraServerService : Service() {
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         createChannel()
         val notif = buildNotification()
-        if (Build.VERSION.SDK_INT >= 29) {
+        if (Build.VERSION.SDK_INT >= 30) {
             startForeground(1, notif, ServiceInfo.FOREGROUND_SERVICE_TYPE_CAMERA or ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE)
         } else {
             startForeground(1, notif)
         }
         isRunning = true
 
-        cameraEngine = CameraEngine(this)
+        cameraEngine = CameraEngine(this).also { it.start() }
         httpServer = CamHttpServer(this, cameraEngine!!, Prefs.port).also { it.start() }
 
         return START_STICKY
